@@ -4,17 +4,15 @@ from datetime import date, datetime, timedelta
 
 from bokeh.models import Legend
 from bokeh.plotting import figure
-from bokeh.io import curdoc
+from bokeh.io import curdoc, export_png
 from bokeh.layouts import row, widgetbox
-from bokeh.models.widgets import TextInput, DatePicker, Button
-from bokeh.models import DatetimeTickFormatter, Tool, String, CustomJS
+from bokeh.models.widgets import TextInput, DatePicker, Button, DataTable, TableColumn, Div
 from bokeh.models import ColumnDataSource, HoverTool, CrosshairTool, BoxZoomTool, ZoomOutTool
+from bokeh.models import DatetimeTickFormatter, Tool, String, CustomJS, DateFormatter, NumberFormatter
 
 
-JS_CODE_SAVE = """
-import * as p from "core/properties"
+JS_CODE_SAVE = """import * as p from "core/properties"
 import {ActionTool, ActionToolView} from "models/tools/actions/action_tool"
-
 export class NewSaveView extends ActionToolView
 
   # this is executed when the button is clicked
@@ -39,11 +37,13 @@ class CustomSaveTool(Tool):
     save_name = String()
 
 def binary(x):
+    '''Convert int to binary and return indices of bits that are 1'''
     bi = list(bin(x)[2:])[::-1]
     indices = np.where(np.array(bi) == "1")[0]
     return indices
 
 def map_indices(x):
+    '''Return list of notifications based on binary of the given int'''
     indices = binary(x)
     notification_mask = {0:"sock off",
                           1:"movement",
@@ -69,13 +69,15 @@ def map_indices(x):
     return list(set(notifications))
 
 def day_limits(df_full):
+    '''Return the earliest timestamp and most recent timestamp of a dataframe'''
     return df_full.timestamp.min(), df_full.timestamp.max()
 
 def load_data(filename):
+    '''Read CSV into dataframe'''
     return pd.read_csv(filename)
 
 def dsn_date(df_full, dsn, dates):
-
+    '''Return dataframe with the data from the given dsn and dates'''
     df = df_full[df_full.dsn == dsn]
     previous_day = str(df.timestamp.max() - timedelta(days=1))
     if not dates:
@@ -85,7 +87,7 @@ def dsn_date(df_full, dsn, dates):
     df = df.sort_values(by=['timestamp'])
     return df
 
-def get_source(df, y_values, names):
+def get_source(df, names):
     '''Put all data needed for plotting into a dictionary'''
 
     def datetime(x):
@@ -105,7 +107,7 @@ def get_source(df, y_values, names):
     bad_data = data_to_plot(df[df.notification_mask != 0], names[:3])
 
     bm = ["xs", "base_state", "movement_raw"]
-    base_mvmt = data_to_plot(df[df.base_state > 3], bm[1:])
+    base_mvmt = data_to_plot(df, bm[1:])
     # Where data is stored so it can be displayed in the tooltip
     source_data = {
         'horizontal'         : horizontal_points,
@@ -123,8 +125,8 @@ def get_source(df, y_values, names):
 
     return source_data, source_data1, source_data2, source_data3, min_val, max_hr
 
-
 def data_to_plot(df, save):
+    '''Split the data based on consecutive readings'''
     data = [[] for i in range(len(save)+1)]
     remove = 0
     d = pd.Timedelta(2, 's')
@@ -154,45 +156,37 @@ def data_to_plot(df, save):
 
     return data
 
-
-
 def plot_data(df, dsn):
     '''Plot the data in the given dataframe
 
     Parameters:
         df        (dataframe) - data from the given dsn
         dsn       (str) - device identifier
-        y_values  (list of series) - y values for the vitals to plot
 
     '''
-
-    y_values = [df.heart_rate_avg, df.oxygen_avg, df.skin_temperature/2, df.base_state*10, df.movement_raw/4]
     names = ["heart_rate_avg", "oxygen_avg", "skin_temperature", "base_state", "movement_raw"]
     colors = ["blue", "orange", "red", "purple", "green"]
     alphas = [.8,8,.8,.7,.6]
 
-    # Where data is stored so it can be displayed in the tooltip
-    source_data, source_data1, source_data2, source_data3, min_val, max_hr = get_source(df, y_values, names)
+    # Where data is stored so it can be displayed and changed dynamically
+    source_data, source_data1, source_data2, source_data3, min_val, max_hr = get_source(df, names)
 
+    # Multiple sources because there are different lengths of data
     source = ColumnDataSource(data=source_data)
     source1 = ColumnDataSource(data=source_data1)
     source2 = ColumnDataSource(data=source_data2)
     source3 = ColumnDataSource(data=source_data3)
 
+    # Build plot tools
     hover_tool = HoverTool(
         tooltips=[
         ( 'time',   '@date{%T}' ),] +
         [(name, '@{}'.format(name)) for name in names] +
         [('notification', '@notification_mask')], #data: good; corrupt
-
-
         formatters={'date'  : 'datetime',}, # use default 'numeral' formatter for other fields
         mode='vline', renderers=[]
     )
-
-    # Vertical line where the mouse is
     crosshair = CrosshairTool(dimensions='height', line_alpha=.6)
-
     box_zoom = BoxZoomTool(dimensions='width')
     zoom_out = ZoomOutTool(dimensions='width', factor=.5)
     save = CustomSaveTool(save_name=dsn)
@@ -206,7 +200,7 @@ def plot_data(df, dsn):
     legend_it = []
 
     for i in range(len(names)):
-        legend_line = p.line(x=df.timestamp.iloc[-1:], y=y_values[i].iloc[-1:], color=colors[i], alpha=1,line_width=2)
+        legend_line = p.line(x=df.timestamp.iloc[-1:], y=0, color=colors[i], alpha=1,line_width=2)
         if names[i] in ["movement_raw", "base_state"]:
             legend_it.append((names[i], [legend_line, p.multi_line(xs='plot_xs', ys='plot_'+names[i], color=colors[i], alpha=alphas[i], source=source1)]))
         else:
@@ -234,28 +228,30 @@ def plot_data(df, dsn):
     p.add_layout(legend, 'right')
     return p, source, source1, source2, source3
 
-
-
-def update_data(p, text_title, text_save, source, source1, source2, source3, dsn, df_full, dates=None):
+def update_data(p, source, source1, source2, source3, dsn, df_full, dates=None):
+    '''Get new dataframe when the dsn or date is changed'''
     names = ['heart_rate_avg', 'oxygen_avg', 'skin_temperature', 'base_state', 'movement_raw']
     df = dsn_date(df_full, dsn, dates)
     if df.shape[0] == 0:
         return df
-    y_values = [df.heart_rate_avg, df.oxygen_avg, df.skin_temperature/2, df.base_state*10, df.movement_raw/4]
-    source.data, source1.data, source2.data, source3.data, min_val, max_hr = get_source(df, y_values, names)
-
-    # Title/save update dsn
-    text_title.value = dsn + " Data"
-    text_save.value = dsn
+    source.data, source1.data, source2.data, source3.data, min_val, max_hr = get_source(df, names)
 
     # change y axis range:
     p.y_range.start = max(0,min_val-10)
     p.y_range.end = max_hr+(24*(len(names)+1))
-    # return df? to change calendar to match dsn
-    return df
 
+def get_daily_avgs(df_full):
+    '''Group data by day and calculate averages'''
+    daily_avg = df_full[df_full.notification_mask == 0]
+    daily_avg.timestamp = pd.to_datetime(daily_avg.timestamp, unit='s')
+    daily_avg = daily_avg.set_index('timestamp')
+    daily_avg = daily_avg[daily_avg.base_state > 3].resample("D").mean()
+    daily_avg.skin_temperature = daily_avg.skin_temperature/2
+
+    return daily_avg
 
 def set_up_widgets(p, source, source1, source2, source3, df, df_full, text_dsn):
+    '''Set up widgets needed after an initial dsn is entered'''
     dsn = text_dsn.value
     # Set up widgets
     text_title = TextInput(title="Title:", value="{} Data".format(dsn))
@@ -266,6 +262,26 @@ def set_up_widgets(p, source, source1, source2, source3, df, df_full, text_dsn):
     calendar = DatePicker(title="Day:", value=date(max_for_dsn.year, max_for_dsn.month, max_for_dsn.day+1),
             max_date=date(max_day.year, max_day.month, max_day.day+1), min_date=date(min_day.year, min_day.month, min_day.day+1))
     button = Button(label="Update", button_type="success")
+
+    columns = [
+        TableColumn(field="day", title="Date", formatter=DateFormatter(format="%m/%d/%Y")),
+        TableColumn(field="hr", title="Avg HR", formatter=NumberFormatter(format="0.0")),
+        TableColumn(field="o2", title="Avg O2", formatter=NumberFormatter(format="0.0")),
+        TableColumn(field="temp", title="Avg Temp", formatter=NumberFormatter(format="0.0"))
+    ]
+
+    table_title = Div(text="""Daily Averages:""", width=200)
+    daily_avg = get_daily_avgs(df_full)
+    data =  {
+        'day' : daily_avg.index,
+        'hr' : daily_avg.heart_rate_avg,
+        'o2' : daily_avg.oxygen_avg,
+        'temp' : daily_avg.skin_temperature
+    }
+    table_source = ColumnDataSource(data=data)
+    data_table = DataTable(source=table_source, columns=columns, width=280, height=180, index_position=None)
+    # export_png(data_table, filename="table.png")
+    save_table = Button(label='Save Daily Averages Table', button_type="primary")
 
     # Set up callbacks
     def update_title(attrname, old, new):
@@ -280,9 +296,14 @@ def set_up_widgets(p, source, source1, source2, source3, df, df_full, text_dsn):
         date_start = "{} 00:00:00".format(calendar.value)
         date_end = "{} 23:59:59".format(calendar.value)
 
-        df_new = update_data(p, text_title, text_save, source, source1, source2, source3, text_dsn.value, df_full,dates=[date_start, date_end])
-        # if df_new is going to be used, make sure it's not empty:
-        # if df_new is empty...
+        update_data(p, source, source1, source2, source3, text_dsn.value, df_full,dates=[date_start, date_end])
+
+        # Title/save update dsn
+        text_title.value = text_dsn.value + " Data"
+        text_save.value = text_dsn.value
+
+    def save():
+        export_png(data_table, filename="{}_averages.png".format(text_dsn.value))
 
     text_title.on_change('value', update_title)
     text_save.on_change('value', update_save)
@@ -290,24 +311,27 @@ def set_up_widgets(p, source, source1, source2, source3, df, df_full, text_dsn):
     button.on_click(update)
     button.js_on_click(CustomJS(args=dict(p=p), code="""p.reset.emit()"""))
 
+    save_table.on_click(save)
+
     # Set up layouts and add to document
-    inputs = widgetbox(text_title, text_save, calendar, button)
+    inputs = widgetbox(text_title, text_save, calendar, button, table_title, data_table, save_table)
 
     curdoc().add_root(row(inputs, p, width=1300))
 
 
-
-df_full = pd.read_csv("two_reds/AC000W000338438_2017_0220_0223.csv", header=None)
+df_full = pd.read_csv("two_reds/AC000W001048203_2017_0511_0516.csv", header=None)
 with open("two_reds/column_names.txt") as f:
     content = f.readlines()
 content = content[0].split(',')
 df_full.columns = content
-# skin_temp is skin_temperature; notifications_mask no s...
-# df_full = df_full[df_full.base_state > 3]
+
+df_full = df_full[df_full.base_state > 3]
 df_full.timestamp = pd.to_datetime(df_full.timestamp, unit='s')
+
 text_dsn = TextInput(title="DSN:")
 dsn_button = Button(label="Update DSN", button_type="success")
 curdoc().add_root(row(text_dsn))
+
 def dsn_text_update(attrname, old, new):
     df = dsn_date(df_full, text_dsn.value, None)
     # df must not be empty
