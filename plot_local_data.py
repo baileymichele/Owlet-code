@@ -123,7 +123,28 @@ def get_source(df, names):
     source_data3 = {'bad_x' : bad_data[0]}
     source_data3.update({'bad_' + names[i] : bad_data[i+1] for i in range(3)})
 
-    return source_data, source_data1, source_data2, source_data3, min_val, max_hr
+    nine = start_indices(df, 9)
+    ten = start_indices(df, 10)
+    yellow = np.insert(ten, 0, nine) # combine indices for 9s and 10s
+    red = start_indices(df, 12)
+
+    source_data4 = {'yellow' : [[df.iloc[i].timestamp]*20 for i in yellow]}
+    source_data4.update({'ys' : [np.linspace(0,500,20) for _ in yellow]})
+    # source_data4.update({'red' : [[df.iloc[i].timestamp]*20 for i in red]})
+    source_data5 = {'red' : [[df.iloc[i].timestamp]*20 for i in red]}
+    source_data5.update({'red_ys' : [np.linspace(0,500,20) for _ in red]})
+
+    return source_data, source_data1, source_data2, source_data3, source_data4, source_data5, min_val, max_hr
+
+def start_indices(df, x):
+    "Returns the indices where the base state changes to x"
+    value = df.base_state.eq(x)
+    indices = np.ndarray.flatten(np.argwhere(value))
+    differences = np.diff(indices)
+    if len(indices) != 0:
+        differences = np.insert(differences, 0, 0)
+    final_indices = list(np.ndarray.flatten(np.argwhere(differences != 1)))
+    return indices[final_indices]
 
 def data_to_plot(df, save):
     '''Split the data based on consecutive readings'''
@@ -169,13 +190,15 @@ def plot_data(df, dsn):
     alphas = [.8,8,.8,.7,.6]
 
     # Where data is stored so it can be displayed and changed dynamically
-    source_data, source_data1, source_data2, source_data3, min_val, max_hr = get_source(df, names)
+    source_data, source_data1, source_data2, source_data3, source_data4, source_data5, min_val, max_hr = get_source(df, names)
 
     # Multiple sources because there are different lengths of data
     source = ColumnDataSource(data=source_data)
     source1 = ColumnDataSource(data=source_data1)
     source2 = ColumnDataSource(data=source_data2)
     source3 = ColumnDataSource(data=source_data3)
+    source4 = ColumnDataSource(data=source_data4)
+    source5 = ColumnDataSource(data=source_data5)
 
     # Build plot tools
     hover_tool = HoverTool(
@@ -207,6 +230,9 @@ def plot_data(df, dsn):
             bad_data_line = p.multi_line(xs='bad_x', ys='bad_'+names[i], color=colors[i], alpha=.1, source=source3)
             legend_it.append((names[i], [legend_line, p.multi_line(xs='good_x', ys='good_'+names[i], color=colors[i], alpha=alphas[i], source=source2), bad_data_line]))
 
+    # print("length of data", len(source4.data['yellow']))
+    legend_it.append(("Yellow notifications", [p.multi_line(xs='yellow', ys='ys', color='#F5BE41', line_dash='dashed', source=source4)]))
+    legend_it.append(("Red notifications", [p.multi_line(xs='red', ys='red_ys', color='red', line_dash='dashed', source=source5)]))
 
     # Creating a location for the tooltip box to appear (so it doesn't cover the data)
     horizontal_line = p.line(x='date', y='horizontal', color='white', alpha =0, source=source)
@@ -226,15 +252,15 @@ def plot_data(df, dsn):
     legend = Legend(items=legend_it)
     legend.click_policy="hide"    # Hide lines when they are clicked on
     p.add_layout(legend, 'right')
-    return p, source, source1, source2, source3
+    return p, source, source1, source2, source3, source4, source5
 
-def update_data(p, source, source1, source2, source3, dsn, df_full, dates=None):
+def update_data(p, source, source1, source2, source3, source4, source5, dsn, df_full, dates=None):
     '''Get new dataframe when the dsn or date is changed'''
     names = ['heart_rate_avg', 'oxygen_avg', 'skin_temperature', 'base_state', 'movement_raw']
     df = dsn_date(df_full, dsn, dates)
     if df.shape[0] == 0:
         return df
-    source.data, source1.data, source2.data, source3.data, min_val, max_hr = get_source(df, names)
+    source.data, source1.data, source2.data, source3.data, source4.data, source5.data, min_val, max_hr = get_source(df, names)
 
     # change y axis range:
     p.y_range.start = max(0,min_val-10)
@@ -250,7 +276,7 @@ def get_daily_avgs(df_full):
 
     return daily_avg
 
-def set_up_widgets(p, source, source1, source2, source3, df, df_full, text_dsn):
+def set_up_widgets(p, source, source1, source2, source3, source4, source5, df, df_full, text_dsn):
     '''Set up widgets needed after an initial dsn is entered'''
     dsn = text_dsn.value
     # Set up widgets
@@ -296,7 +322,7 @@ def set_up_widgets(p, source, source1, source2, source3, df, df_full, text_dsn):
         date_start = "{} 00:00:00".format(calendar.value)
         date_end = "{} 23:59:59".format(calendar.value)
 
-        update_data(p, source, source1, source2, source3, text_dsn.value, df_full,dates=[date_start, date_end])
+        update_data(p, source, source1, source2, source3, source4, source5, text_dsn.value, df_full,dates=[date_start, date_end])
 
         # Title/save update dsn
         text_title.value = text_dsn.value + " Data"
@@ -319,7 +345,7 @@ def set_up_widgets(p, source, source1, source2, source3, df, df_full, text_dsn):
     curdoc().add_root(row(inputs, p, width=1300))
 
 
-df_full = pd.read_csv("two_reds/AC000W001048203_2017_0511_0516.csv", header=None)
+df_full = pd.read_csv("two_reds/AC000W000338438_2017_0220_0223.csv", header=None)
 with open("two_reds/column_names.txt") as f:
     content = f.readlines()
 content = content[0].split(',')
@@ -335,8 +361,8 @@ curdoc().add_root(row(text_dsn))
 def dsn_text_update(attrname, old, new):
     df = dsn_date(df_full, text_dsn.value, None)
     # df must not be empty
-    p, source, source1, source2, source3 = plot_data(df, text_dsn.value)
+    p, source, source1, source2, source3, source4, source5 = plot_data(df, text_dsn.value)
     text_dsn.remove_on_change('value', dsn_text_update)
-    set_up_widgets(p, source, source1, source2, source3, df, df_full, text_dsn)
+    set_up_widgets(p, source, source1, source2, source3, source4, source5, df, df_full, text_dsn)
 
 text_dsn.on_change('value', dsn_text_update)
